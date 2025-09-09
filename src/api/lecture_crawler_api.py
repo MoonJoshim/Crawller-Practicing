@@ -158,26 +158,90 @@ def search_lecture(driver, keyword):
         # 검색 결과 수집
         lectures = []
         try:
-            # 강의 목록 찾기
-            lecture_items = driver.find_elements(By.CSS_SELECTOR, '.item')[:3]  # 최대 3개만
+            print("🔍 검색 결과 페이지 분석 중...")
             
-            for item in lecture_items:
+            # 페이지 소스 일부 확인 (디버깅용)
+            page_source = driver.page_source
+            print(f"📄 페이지 길이: {len(page_source)} 문자")
+            
+            # 여러 선택자로 강의 목록 찾기 시도
+            selectors = [
+                '.item',           # 기본 아이템
+                '.lecture',        # 강의 클래스
+                'tr',             # 테이블 행
+                '.list tr',       # 리스트 내 테이블 행
+                '[class*="item"]', # item이 포함된 클래스
+                '.course',        # 코스 클래스
+                'li'              # 리스트 아이템
+            ]
+            
+            lecture_items = []
+            for selector in selectors:
                 try:
-                    # 강의명
-                    subject_elem = item.find_element(By.CSS_SELECTOR, '.name')
-                    subject = subject_elem.text.strip()
+                    items = driver.find_elements(By.CSS_SELECTOR, selector)
+                    if items:
+                        print(f"✅ 선택자 '{selector}'로 {len(items)}개 요소 발견")
+                        lecture_items = items[:10]  # 최대 10개만
+                        break
+                except:
+                    continue
+            
+            if not lecture_items:
+                print("❌ 강의 목록 요소를 찾을 수 없음")
+                # 페이지 소스 일부 출력 (디버깅)
+                print("📝 페이지 소스 일부:")
+                print(page_source[:1000])
+                return []
+            
+            print(f"📋 {len(lecture_items)}개 요소에서 강의 정보 추출 시도")
+            
+            for i, item in enumerate(lecture_items):
+                try:
+                    print(f"📝 요소 {i+1} 분석 중...")
                     
-                    # 교수명
-                    professor_elem = item.find_element(By.CSS_SELECTOR, '.professor')
-                    professor = professor_elem.text.strip()
+                    # 강의명 추출 (여러 선택자 시도)
+                    subject = ""
+                    subject_selectors = ['.name', '.subject', '.title', 'td:first-child', '.course-name']
+                    for sel in subject_selectors:
+                        try:
+                            subject_elem = item.find_element(By.CSS_SELECTOR, sel)
+                            subject = subject_elem.text.strip()
+                            if subject:
+                                print(f"   ✅ 강의명: '{subject}' (선택자: {sel})")
+                                break
+                        except:
+                            continue
                     
-                    # 평점 (있는 경우)
+                    if not subject:
+                        print(f"   ❌ 강의명을 찾을 수 없음 - 요소 텍스트: '{item.text[:50]}...'")
+                        continue
+                    
+                    # 교수명 추출 (여러 선택자 시도)
+                    professor = "정보 없음"
+                    professor_selectors = ['.professor', '.teacher', '.instructor', 'td:nth-child(2)', '.prof']
+                    for sel in professor_selectors:
+                        try:
+                            professor_elem = item.find_element(By.CSS_SELECTOR, sel)
+                            professor = professor_elem.text.strip()
+                            if professor:
+                                print(f"   ✅ 교수명: '{professor}' (선택자: {sel})")
+                                break
+                        except:
+                            continue
+                    
+                    # 평점 추출 (여러 선택자 시도)
                     rating = 0.0
-                    try:
-                        rating_elem = item.find_element(By.CSS_SELECTOR, '.rating')
-                        rating = float(rating_elem.text.strip())
-                    except:
-                        rating = 0.0
+                    rating_selectors = ['.rating', '.score', '.rate', '.grade']
+                    for sel in rating_selectors:
+                        try:
+                            rating_elem = item.find_element(By.CSS_SELECTOR, sel)
+                            rating_text = rating_elem.text.strip()
+                            if rating_text:
+                                rating = float(rating_text)
+                                print(f"   ✅ 평점: {rating} (선택자: {sel})")
+                                break
+                        except:
+                            continue
                     
                     lectures.append({
                         'subject': subject,
