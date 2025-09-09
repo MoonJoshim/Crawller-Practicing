@@ -5,6 +5,7 @@
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import urllib.parse
 import time
 import os
 from dotenv import load_dotenv
@@ -25,12 +26,13 @@ import json
 load_dotenv()
 
 app = Flask(__name__)
+app.config['JSON_AS_ASCII'] = False  # 한글 JSON 응답을 위해
 CORS(app)  # CORS 허용
 
 def setup_driver():
     """Chrome 웹드라이버 설정"""
     chrome_options = Options()
-    chrome_options.add_argument("--headless")  # 헤드리스 모드
+    # chrome_options.add_argument("--headless")  # reCAPTCHA 때문에 헤드리스 모드 비활성화
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
@@ -54,38 +56,49 @@ def login_to_everytime(driver):
         driver.get("https://everytime.kr/login")
         time.sleep(3)
         
-        # ID 입력
-        id_input = driver.find_element(By.NAME, "userid")
-        id_input.send_keys(os.getenv("EVERYTIME_ID", "ajoudoriii"))
+        # ID 입력 (페이지 구조 변경에 따라 수정)
+        try:
+            id_input = driver.find_element(By.NAME, "userid")
+        except:
+            id_input = driver.find_element(By.NAME, "id")
+        id_input.send_keys(os.getenv("EVERYTIME_ID"))
         
         # 비밀번호 입력
         pw_input = driver.find_element(By.NAME, "password")
-        pw_input.send_keys(os.getenv("EVERYTIME_PASSWORD", "standing0812@"))
+        pw_input.send_keys(os.getenv("EVERYTIME_PASSWORD"))
         
         # 로그인 버튼 클릭
         login_btn = driver.find_element(By.CSS_SELECTOR, 'input[type="submit"]')
         login_btn.click()
-        time.sleep(5)
         
-        # Alert 처리
-        try:
-            alert = driver.switch_to.alert
-            alert.accept()
-            print("❌ 로그인 실패 - Alert 발생")
-            return False
-        except:
-            pass
+        print("🤖 reCAPTCHA가 있을 수 있습니다. 수동으로 해결해주세요...")
+        print("⏰ 30초 대기 중... (reCAPTCHA 해결 후 자동 진행)")
         
-        current_url = driver.current_url
-        if "login" not in current_url.lower():
-            print("✅ 로그인 성공!")
-            return True
-        else:
-            print("❌ 로그인 실패!")
-            return False
+        # reCAPTCHA 해결을 위해 더 긴 대기 시간
+        for i in range(30):
+            time.sleep(1)
+            current_url = driver.current_url
+            
+            # 로그인 성공 확인 (URL 변경 또는 특정 요소 존재)
+            if "login" not in current_url.lower() or "everytime.kr/" in current_url:
+                print("로그인 성공!")
+                return True
+                
+            # Alert 처리
+            try:
+                alert = driver.switch_to.alert
+                alert_text = alert.text
+                alert.accept()
+                print(f"로그인 실패 - Alert: {alert_text}")
+                return False
+            except:
+                pass
+        
+        print("⏰ 시간 초과 - 로그인 확인 불가")
+        return False
             
     except Exception as e:
-        print(f"❌ 로그인 오류: {str(e)}")
+        print(f"로그인 오류: {str(e)}")
         return False
 
 def search_lecture(driver, keyword):
@@ -97,13 +110,49 @@ def search_lecture(driver, keyword):
         driver.get("https://everytime.kr/lecture")
         time.sleep(3)
         
-        # 검색창에 키워드 입력
-        search_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, 'input[placeholder*="과목"]'))
-        )
+        # 과목명 라디오 버튼 선택 (기본값이지만 명시적으로 선택)
+        try:
+            subject_radio = driver.find_element(By.CSS_SELECTOR, 'input[value="subject"]')
+            if not subject_radio.is_selected():
+                subject_radio.click()
+                time.sleep(1)
+        except:
+            print("⚠️ 과목명 라디오 버튼을 찾을 수 없음")
+        
+        # 검색창 찾기 (여러 선택자 시도)
+        search_input = None
+        selectors = [
+            'input[placeholder*="과목"]',
+            'input[name="keyword"]',
+            'input[type="text"]',
+            '#keyword'
+        ]
+        
+        for selector in selectors:
+            try:
+                search_input = WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                )
+                print(f"검색창 발견: {selector}")
+                break
+            except:
+                continue
+                
+        if not search_input:
+            print("검색창을 찾을 수 없음")
+            return []
+        
+        # 검색어 입력
         search_input.clear()
         search_input.send_keys(keyword)
-        search_input.submit()
+        
+        # 검색 버튼 클릭 또는 엔터
+        try:
+            search_button = driver.find_element(By.CSS_SELECTOR, 'input[type="submit"], button[type="submit"]')
+            search_button.click()
+        except:
+            search_input.submit()
+            
         time.sleep(5)
         
         # 검색 결과 수집
@@ -151,17 +200,44 @@ def search_lecture(driver, keyword):
         except Exception as e:
             print(f"검색 결과 처리 오류: {e}")
         
-        print(f"✅ {len(lectures)}개 강의 발견")
+        print(f"{len(lectures)}개 강의 발견")
         return lectures
         
     except Exception as e:
-        print(f"❌ 검색 오류: {str(e)}")
+        print(f"검색 오류: {str(e)}")
         return []
 
 @app.route('/api/search', methods=['GET'])
 def api_search():
     """강의 검색 API"""
     keyword = request.args.get('keyword', '').strip()
+    
+    # 한글 인코딩 문제 해결
+    original_keyword = keyword
+    try:
+        # 1. URL 디코딩 시도
+        if '%' in keyword:
+            keyword = urllib.parse.unquote(keyword)
+            print(f"📝 URL 디코딩: '{original_keyword}' → '{keyword}'")
+        
+        # 2. UTF-8 바이트 문제 해결
+        if isinstance(keyword, bytes):
+            keyword = keyword.decode('utf-8')
+            print(f"📝 바이트 디코딩: bytes → '{keyword}'")
+            
+        # 3. 잘못된 UTF-8 해석 수정 (Latin-1로 해석된 UTF-8을 다시 디코딩)
+        if len(keyword.encode('utf-8')) != len(keyword):
+            try:
+                # Latin-1로 인코딩한 후 UTF-8로 디코딩
+                keyword = keyword.encode('latin-1').decode('utf-8')
+                print(f"📝 UTF-8 재해석: '{original_keyword}' → '{keyword}'")
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"⚠️ 키워드 디코딩 오류: {e}")
+    
+    print(f"🔍 최종 검색 키워드: '{keyword}' (길이: {len(keyword)}) [원본길이: {len(original_keyword)}]")
     
     if not keyword:
         return jsonify({'error': '검색어를 입력해주세요'}), 400
@@ -291,6 +367,120 @@ def api_search():
                 "assignment": "많음",
                 "teamProject": "없음"
             }
+        }],
+        "소프트웨어공학": [{
+            "subject": "소프트웨어공학",
+            "professor": "김소프트",
+            "rating": 4.1,
+            "reviewCount": 25,
+            "reviews": [
+                {"rating": 4.5, "comment": "개발 프로세스부터 테스팅까지 전반적으로 배울 수 있어요. 실무에 도움됨.", "semester": "24년 1학기"},
+                {"rating": 3.5, "comment": "이론 위주지만 중요한 내용들. 팀 프로젝트가 좀 힘들어요.", "semester": "23년 2학기"},
+                {"rating": 4.0, "comment": "UML, 설계 패턴 등 유익한 내용 많음. 추천합니다.", "semester": "23년 1학기"},
+                {"rating": 2.5, "comment": "너무 이론적이고 지루함. 실습이 더 있었으면 좋겠어요.", "semester": "24년 1학기"},
+                {"rating": 4.5, "comment": "소프트웨어 개발자 꿈꾸는 사람에게 필수 과목!", "semester": "22년 2학기"}
+            ],
+            "details": {
+                "attendance": "전자출결",
+                "exam": "중간, 기말",
+                "assignment": "보통",
+                "teamProject": "있음"
+            }
+        }],
+        "네트워크": [{
+            "subject": "컴퓨터네트워크",
+            "professor": "박네트워크",
+            "rating": 3.6,
+            "reviewCount": 31,
+            "reviews": [
+                {"rating": 4.0, "comment": "TCP/IP부터 라우팅까지 체계적으로 배울 수 있음. 어렵지만 유익해요.", "semester": "24년 1학기"},
+                {"rating": 3.0, "comment": "개념이 어렵고 암기할 것이 많아요. 복습 필수.", "semester": "23년 2학기"},
+                {"rating": 4.5, "comment": "네트워크 관리자 꿈꾸는 사람에게 추천. 실습도 있어서 좋음.", "semester": "23년 1학기"},
+                {"rating": 2.0, "comment": "너무 어려워서 포기하고 싶었음. 기초 지식 필요.", "semester": "24년 1학기"},
+                {"rating": 3.5, "comment": "이론은 딱딱하지만 실무에서 꼭 필요한 내용들.", "semester": "22년 2학기"}
+            ],
+            "details": {
+                "attendance": "직접호명",
+                "exam": "중간, 기말",
+                "assignment": "보통",
+                "teamProject": "없음"
+            }
+        }],
+        "머신러닝": [{
+            "subject": "머신러닝",
+            "professor": "이에이아이",
+            "rating": 4.3,
+            "reviewCount": 42,
+            "reviews": [
+                {"rating": 5.0, "comment": "AI 시대에 꼭 필요한 과목! Python 실습도 많고 재밌어요.", "semester": "24년 1학기"},
+                {"rating": 4.0, "comment": "수학적 배경 지식이 필요하지만 흥미로운 내용들. 추천!", "semester": "23년 2학기"},
+                {"rating": 3.5, "comment": "개념은 좋은데 구현이 어려워요. 과제 부담 있음.", "semester": "23년 1학기"},
+                {"rating": 4.5, "comment": "딥러닝까지 다뤄서 좋음. 취업에도 도움될 것 같아요.", "semester": "22년 2학기"},
+                {"rating": 2.5, "comment": "수학을 못하면 따라가기 힘듦. 선형대수 미리 공부하세요.", "semester": "24년 1학기"}
+            ],
+            "details": {
+                "attendance": "전자출결",
+                "exam": "중간, 기말",
+                "assignment": "많음",
+                "teamProject": "있음"
+            }
+        }],
+        "모바일프로그래밍": [{
+            "subject": "모바일프로그래밍",
+            "professor": "최모바일",
+            "rating": 4.4,
+            "reviewCount": 38,
+            "reviews": [
+                {"rating": 5.0, "comment": "안드로이드 앱 개발을 처음부터 끝까지! 포트폴리오도 만들 수 있어요.", "semester": "24년 1학기"},
+                {"rating": 4.0, "comment": "Java 기초가 있으면 좋음. 실습 위주라 재밌어요.", "semester": "23년 2학기"},
+                {"rating": 4.5, "comment": "앱스토어에 출시까지 해볼 수 있어서 좋음. 추천!", "semester": "23년 1학기"},
+                {"rating": 3.0, "comment": "과제가 많고 디버깅이 힘들어요. 인내심 필요.", "semester": "22년 2학기"},
+                {"rating": 4.5, "comment": "모바일 개발자 꿈꾸는 사람에게 최고의 과목!", "semester": "24년 1학기"}
+            ],
+            "details": {
+                "attendance": "전자출결",
+                "exam": "없음",
+                "assignment": "많음",
+                "teamProject": "있음"
+            }
+        }],
+        "게임프로그래밍": [{
+            "subject": "게임프로그래밍",
+            "professor": "강게임",
+            "rating": 4.7,
+            "reviewCount": 29,
+            "reviews": [
+                {"rating": 5.0, "comment": "Unity로 게임 만드는 과목! 정말 재밌고 실습 위주라 좋아요.", "semester": "24년 1학기"},
+                {"rating": 4.5, "comment": "C# 기초부터 게임 엔진까지 배울 수 있음. 강추!", "semester": "23년 2학기"},
+                {"rating": 4.0, "comment": "과제는 많지만 재밌어서 시간 가는 줄 모름. 추천해요.", "semester": "23년 1학기"},
+                {"rating": 5.0, "comment": "게임 개발자 꿈꾸는 사람에게 최고! 포트폴리오도 만들 수 있어요.", "semester": "22년 2학기"},
+                {"rating": 3.5, "comment": "재밌지만 디버깅이 어려워요. 인내심과 창의력 필요.", "semester": "24년 1학기"}
+            ],
+            "details": {
+                "attendance": "전자출결",
+                "exam": "없음",
+                "assignment": "많음",
+                "teamProject": "있음"
+            }
+        }],
+        "보안": [{
+            "subject": "정보보안",
+            "professor": "박보안",
+            "rating": 3.9,
+            "reviewCount": 27,
+            "reviews": [
+                {"rating": 4.0, "comment": "해킹부터 암호학까지 폭넓게 배울 수 있어요. 흥미로운 과목.", "semester": "24년 1학기"},
+                {"rating": 3.5, "comment": "이론이 많고 어려워요. 하지만 중요한 내용들.", "semester": "23년 2학기"},
+                {"rating": 4.5, "comment": "실습으로 해킹 기법도 배우고 재밌어요. 추천!", "semester": "23년 1학기"},
+                {"rating": 2.5, "comment": "너무 어렵고 암기할 것이 많아요. 수학 기초 필요.", "semester": "22년 2학기"},
+                {"rating": 4.0, "comment": "보안 전문가 되고 싶다면 필수 과목. 유익함.", "semester": "24년 1학기"}
+            ],
+            "details": {
+                "attendance": "직접호명",
+                "exam": "중간, 기말",
+                "assignment": "보통",
+                "teamProject": "없음"
+            }
         }]
     }
     
@@ -325,12 +515,12 @@ def api_search():
             if login_to_everytime(driver):
                 crawled_results = search_lecture(driver, keyword)
                 unique_results.extend(crawled_results)
-                print(f"✅ 실제 크롤링 완료: {len(crawled_results)}개 강의 발견")
+                print(f"실제 크롤링 완료: {len(crawled_results)}개 강의 발견")
             else:
-                print("❌ 로그인 실패")
+                print("로그인 실패")
             driver.quit()
         except Exception as e:
-            print(f"❌ 실제 크롤링 오류: {str(e)}")
+            print(f"실제 크롤링 오류: {str(e)}")
             unique_results = []
     
     return jsonify({
